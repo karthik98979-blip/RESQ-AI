@@ -9,8 +9,10 @@ from streamlit_folium import st_folium
 from ai_engine.classifier import classify_disaster
 from ai_engine.severity import assess_severity
 from ai_engine.priority import calculate_priority
+from database import fetch_recent_reports, init_db, save_emergency_report
 
 st.set_page_config(page_title="RESQ AI Command Center", page_icon="🚨", layout="wide")
+init_db()
 
 # SESSION STATE
 defaults = {
@@ -381,6 +383,23 @@ elif st.session_state.nav == "🧠 AI Analysis":
                 "report": report
             }
 
+            try:
+                report_id = save_emergency_report(
+                    disaster_type=disaster,
+                    location_text=location,
+                    description=report,
+                    affected_people=people,
+                    people_trapped=trapped == "Yes",
+                    severity_score=severity_score,
+                    severity=severity,
+                    priority_score=priority_score,
+                    priority_level=priority,
+                )
+                st.session_state.analysis["report_id"] = report_id
+                st.success(f"Report saved to the local database (ID {report_id}).")
+            except Exception as error:
+                st.error(f"Analysis completed, but the report could not be saved: {error}")
+
     if st.session_state.analysis:
         q = st.session_state.analysis
 
@@ -448,22 +467,55 @@ elif st.session_state.nav == "🗺️ Live Map":
 elif st.session_state.nav == "📊 Reports":
 
     st.header("📊 INCIDENT REPORTS")
+    try:
+        reports = fetch_recent_reports()
+    except Exception as error:
+        reports = []
+        st.error(f"Could not load reports from the local database: {error}")
 
-    if st.session_state.analysis:
-        q = st.session_state.analysis
-
+    if reports:
+        urgent_count = sum(row["priority_level"] == "Urgent" for row in reports)
+        high_count = sum(row["severity"] in ("High", "Critical") for row in reports)
         a, b, c = st.columns(3)
-        a.metric("DISASTER", q["disaster"])
-        b.metric("SEVERITY", q["severity"])
-        c.metric("PRIORITY", q["priority"])
+        a.metric("SAVED REPORTS", len(reports))
+        b.metric("URGENT PRIORITY", urgent_count)
+        c.metric("HIGH / CRITICAL", high_count)
 
-        st.write("**Location:**", q["location"] or "Not provided")
-        st.write("**People affected:**", q["people"])
-        st.write("**People trapped:**", q["trapped"])
-        st.write("**Description:**", q["report"])
+        st.dataframe(
+            [
+                {
+                    "ID": row["report_id"],
+                    "Disaster": row["disaster_type"],
+                    "Location": row["location_text"],
+                    "People Affected": row["affected_people"],
+                    "Severity": row["severity"],
+                    "Priority": row["priority_level"],
+                    "Priority Score": row["priority_score"],
+                    "Status": row["status"],
+                    "Reported At (UTC)": row["created_at"],
+                }
+                for row in reports
+            ],
+            use_container_width=True,
+            hide_index=True,
+        )
 
+        with st.expander("View report descriptions"):
+            for row in reports:
+                st.markdown(
+                    f"**#{row['report_id']} · {row['disaster_type']} · "
+                    f"{row['location_text']}**"
+                )
+                st.write(row["description"])
+                st.caption(
+                    f"Affected: {row['affected_people']} · "
+                    f"Trapped: {'Yes' if row['people_trapped'] else 'No'} · "
+                    f"Severity score: {row['severity_score']} · "
+                    f"Reported at: {row['created_at']}"
+                )
+                st.markdown("---")
     else:
-        st.info("No report yet. Submit an incident in AI Analysis.")
+        st.info("No saved reports yet. Submit an incident in AI Analysis.")
 
 
 # CHATBOT
