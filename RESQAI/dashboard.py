@@ -6,11 +6,43 @@ sys.path.insert(0, str(ROOT_DIR))
 import streamlit as st
 import folium
 from streamlit_folium import st_folium
+st.set_page_config(
+    page_title="RESQ AI Command Center",
+    layout="wide"
+)
 from ai_engine.classifier import classify_disaster
 from ai_engine.severity import assess_severity
 from ai_engine.priority import calculate_priority
 
-st.set_page_config(page_title="RESQ AI Command Center", page_icon="🚨", layout="wide")
+from supabase import create_client
+
+SUPABASE_URL = st.secrets["SUPABASE_URL"]
+SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
+supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+def signup_user(email, password, full_name):
+    try:
+        response = supabase.auth.sign_up({
+            "email": email,
+            "password": password,
+            "options": {
+                "data": {"full_name": full_name}
+            }
+        })
+        return response
+    except Exception as e:
+        st.error(f"Signup failed: {e}")
+
+
+def login_user(email, password):
+    try:
+        response = supabase.auth.sign_in_with_password({
+            "email": email,
+            "password": password
+        })
+        return response
+    except Exception as e:
+        st.error(f"Login failed: {e}")
 
 # SESSION STATE
 defaults = {
@@ -31,8 +63,82 @@ for key, value in defaults.items():
     if key not in st.session_state:
         st.session_state[key] = value
 
+ # USER LOGIN STATE
+if "user" not in st.session_state:
+    st.session_state.user = None
+
+if st.session_state.user is None:
+
+    st.title("🚨 RESQ AI - Login")
+
+    tab1, tab2 = st.tabs(["Login", "Sign Up"])
+
+    with tab1:
+        email = st.text_input("Email", key="login_email")
+        password = st.text_input(
+            "Password",
+            type="password",
+            key="login_password"
+        )
+
+        if st.button("Login"):
+            response = login_user(email, password)
+
+            if response and response.user:
+               st.session_state.user = response.user
+               st.session_state.access_token = response.session.access_token
+               st.session_state.refresh_token = response.session.refresh_token
+
+               st.success("Login successful!")
+               st.rerun()
+
+
+    with tab2:
+        name = st.text_input("Full Name", key="signup_name")
+        new_email = st.text_input("Email", key="signup_email")
+        new_password = st.text_input(
+            "Password",
+            type="password",
+            key="signup_password"
+        )
+
+        if st.button("Create Account"):
+            response = signup_user(
+                new_email,
+                new_password,
+                name
+            )
+
+            if response and response.user:
+                st.success(
+                    "Account created! Check your email if confirmation is required."
+                )
+
+    st.stop()
 
 # DASHBOARD FUNCTIONS
+# GET SAVED INCIDENTS
+# GET SAVED INCIDENTS
+def get_incidents():
+    try:
+        supabase.auth.set_session(
+            st.session_state.access_token,
+            st.session_state.refresh_token
+        )
+
+        response = (
+            supabase.table("incidents")
+            .select("*")
+            .eq("user_id", st.session_state.user.id)
+            .order("created_at", desc=True)
+            .execute()
+        )
+
+        return response.data
+
+    except Exception as e:
+        st.error(f"Unable to load incidents: {e}")
+        return []
 def demo():
     st.session_state.report = "Flood water rising near houses and people trapped"
     st.session_state.people = 25
@@ -258,8 +364,8 @@ with st.sidebar:
         [
             "🏠 Dashboard",
             "🧠 AI Analysis",
+            "📋 Incident History",
             "🗺️ Live Map",
-            "📊 Reports",
             "🤖 AI Chatbot",
             "⚙️ About"
         ],
@@ -329,6 +435,15 @@ elif st.session_state.nav == "🧠 AI Analysis":
 
     st.header("🧠 AI EMERGENCY ANALYSIS")
 
+    st.markdown("""
+    <style>
+    textarea::placeholder {
+        color: white !important;
+        opacity: 1 !important;
+    }
+     </style>
+""", unsafe_allow_html=True)
+
     with st.form("incident_form"):
 
         report = st.text_area(
@@ -380,6 +495,30 @@ elif st.session_state.nav == "🧠 AI Analysis":
                 "location": location,
                 "report": report
             }
+
+
+
+                      # SAVE INCIDENT IN SUPABASE
+            try:
+                supabase.auth.set_session(
+                    st.session_state.access_token,
+                    st.session_state.refresh_token
+                )
+
+                supabase.table("incidents").insert({
+                    "user_id": st.session_state.user.id,
+                    "disaster_type": disaster,
+                    "location": location,
+                    "affected_people": people,
+                    "trapped_people": 1 if trapped == "Yes" else 0,
+                    "severity": severity,
+                    "description": report
+                }).execute()
+
+                st.success("Incident saved successfully!")
+
+            except Exception as e:
+                st.error(f"Incident save failed: {e}")
 
     if st.session_state.analysis:
         q = st.session_state.analysis
@@ -444,8 +583,90 @@ elif st.session_state.nav == "🗺️ Live Map":
     st.caption("Map tiles need internet access. Marker uses the coordinates entered above.")
 
 
+# INCIDENT HISTORY
+elif st.session_state.nav == "📋 Incident History":
+
+    st.header("📋 INCIDENT HISTORY")
+    st.caption("Your previously reported incidents")
+
+    incidents = get_incidents()
+                                                   
+    if incidents:
+        st.dataframe(
+            incidents,
+            use_container_width=True,
+            hide_index=True
+        )
+
+        st.success(f"Total incidents: {len(incidents)}")
+
+        st.markdown("---")
+        st.subheader("🗑️ MANAGE INCIDENT HISTORY")
+
+        selected_ids = st.multiselect(
+            "Select incidents to delete",
+            options=[item["id"] for item in incidents],
+            format_func=lambda x: next(
+                f'ID: {item["id"]} | {item["disaster_type"]} | {item["location"]}'
+                for item in incidents if item["id"] == x
+            )
+        )
+
+        if st.button("🗑️ DELETE SELECTED"):
+            if selected_ids:
+                st.session_state.delete_ids = selected_ids
+                st.session_state.delete_mode = "selected"
+                st.rerun()
+            else:
+                st.warning("Please select incidents first.")
+
+        if st.button("🔥 DELETE ALL HISTORY"):
+            st.session_state.delete_ids = [item["id"] for item in incidents]
+            st.session_state.delete_mode = "all"
+            st.rerun()
+
+        if st.session_state.get("delete_mode"):
+
+            st.warning("Are you sure? This action cannot be undone.")
+            if st.button("YES, CONFIRM DELETE"):
+                try:
+                    supabase.auth.set_session(
+                        st.session_state.access_token,
+                        st.session_state.refresh_token
+                    )
+
+                    response = supabase.table("incidents").delete().in_(
+                        "id", st.session_state.delete_ids
+                    ).eq(
+                        "user_id", st.session_state.user.id
+                    ).execute()
+
+                    if response.data:
+                        st.success(
+                            f"{len(response.data)} incident(s) deleted!"
+                        )
+                    else:
+                        st.warning("No matching incidents deleted.")
+
+                    st.session_state.delete_ids = []
+                    st.session_state.delete_mode = None
+                    st.rerun()
+
+                except Exception as e:
+                    st.error(f"Delete failed: {e}")
+
+            if st.button("CANCEL"):
+                st.session_state.delete_ids = []
+                st.session_state.delete_mode = None
+                st.rerun()
+
+            else:
+                st.info("No incidents found. Submit a new incident to get started.")
+
+        
 # REPORTS
 elif st.session_state.nav == "📊 Reports":
+
 
     st.header("📊 INCIDENT REPORTS")
 
